@@ -5,100 +5,97 @@ import string
 import time
 from fastapi import FastAPI, Request, Form, HTTPException, Response
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
-# --- 1. SETUP DIRECTORIES & DATABASE ---
-required_folders = ["static", "templates"]
-for folder in required_folders:
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-
+# --- DATABASE SETUP ---
 def get_db():
     conn = sqlite3.connect("scripts.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-# Initialize Database Table
 db = get_db()
-db.execute('''CREATE TABLE IF NOT EXISTS scripts (
-    id TEXT PRIMARY KEY, title TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, views INTEGER DEFAULT 0
-)''')
-db.execute('''CREATE TABLE IF NOT EXISTS versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, script_id TEXT, content TEXT, version_number INTEGER
-)''')
+db.execute("CREATE TABLE IF NOT EXISTS scripts (id TEXT PRIMARY KEY, title TEXT, views INTEGER DEFAULT 0)")
+db.execute("CREATE TABLE IF NOT EXISTS versions (id INTEGER PRIMARY KEY, script_id TEXT, content TEXT, v INTEGER)")
 db.commit()
 
-# --- 2. APP INITIALIZATION ---
 app = FastAPI()
-
-# Mount static files safely
-if os.path.exists("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-
-templates = Jinja2Templates(directory="templates")
-
-# --- 3. HELPER FUNCTIONS ---
 upload_history = {}
 
-def generate_id(length=8):
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+# --- UI TEMPLATES (Built-in) ---
+BASE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScriptCDN</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #020617; color: white; }
+        .glass { background: rgba(255,255,255,0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+    </style>
+</head>
+<body class="p-6">
+    <nav class="max-w-4xl mx-auto flex justify-between mb-10">
+        <b class="text-xl text-blue-400">ScriptCDN</b>
+        <div class="space-x-4">
+            <a href="/" class="text-sm">Upload</a>
+            <a href="/dashboard" class="text-sm">My Scripts</a>
+        </div>
+    </nav>
+    <main class="max-w-4xl mx-auto">{content}</main>
+</body>
+</html>
+"""
 
-# --- 4. ROUTES ---
+# --- ROUTES ---
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    try:
-        return templates.TemplateResponse("index.html", {"request": request})
-    except Exception:
-        return HTMLResponse("<h1>Setup incomplete</h1><p>Please ensure templates/index.html exists.</p>")
-
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+async def home():
+    content = """
+    <div class="glass p-8 rounded-2xl">
+        <h2 class="text-2xl font-bold mb-4">Upload Lua Script</h2>
+        <form action="/upload" method="post" class="space-y-4">
+            <input type="text" name="title" placeholder="Script Name" class="w-full bg-white/5 p-3 rounded-lg outline-none border border-white/10 focus:border-blue-500">
+            <textarea name="content" rows="8" placeholder="print('Hello World')" class="w-full bg-white/5 p-3 rounded-lg outline-none border border-white/10 font-mono text-sm"></textarea>
+            <button type="submit" class="w-full bg-blue-600 py-3 rounded-lg font-bold">Deploy to CDN</button>
+        </form>
+    </div>
+    """
+    return BASE_HTML.format(content=content)
 
 @app.post("/upload")
-async def upload_script(request: Request, title: str = Form(...), content: str = Form(...)):
-    client_ip = request.client.host
-    current_time = time.time()
-    
-    if client_ip in upload_history and current_time - upload_history[client_ip] < 5:
-        raise HTTPException(status_code=429, detail="Wait 5 seconds.")
-    
+async def upload(request: Request, title: str = Form(...), content: str = Form(...)):
+    sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
     db = get_db()
-    script_id = generate_id()
-    db.execute("INSERT INTO scripts (id, title) VALUES (?, ?)", (script_id, title))
-    db.execute("INSERT INTO versions (script_id, content, version_number) VALUES (?, ?, ?)", (script_id, content, 1))
+    db.execute("INSERT INTO scripts (id, title) VALUES (?, ?)", (sid, title))
+    db.execute("INSERT INTO versions (script_id, content, v) VALUES (?, ?, ?)", (sid, content, 1))
     db.commit()
-    
-    upload_history[client_ip] = current_time
-    return {"id": script_id, "raw_url": f"{request.base_url}raw/{script_id}"}
+    return HTMLResponse(f"<script>alert('Uploaded!'); window.location.href='/dashboard';</script>")
 
-@app.get("/raw/{script_id}")
-async def get_raw_script(script_id: str, v: int = None):
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
     db = get_db()
-    if v:
-        row = db.execute("SELECT content FROM versions WHERE script_id = ? AND version_number = ?", (script_id, v)).fetchone()
-    else:
-        row = db.execute("SELECT content FROM versions WHERE script_id = ? ORDER BY version_number DESC LIMIT 1", (script_id,)).fetchone()
-    
-    if not row:
-        return Response(content="-- Script not found", media_type="text/plain")
+    rows = db.execute("SELECT * FROM scripts ORDER BY id DESC").fetchall()
+    cards = ""
+    for r in rows:
+        url = f"/raw/{r['id']}"
+        cards += f"""
+        <div class="glass p-5 rounded-xl mb-4">
+            <h3 class="font-bold">{r['title']}</h3>
+            <p class="text-xs text-gray-500 mb-4">ID: {r['id']} | Views: {r['views']}</p>
+            <div class="flex gap-2">
+                <button onclick="navigator.clipboard.writeText('loadstring(game:HttpGet(\\''+window.location.origin+'{url}\\'))()'); alert('Copied!')" class="bg-blue-600 px-4 py-2 rounded text-xs">Copy Loadstring</button>
+                <a href="{url}" target="_blank" class="bg-white/10 px-4 py-2 rounded text-xs">View Raw</a>
+            </div>
+        </div>
+        """
+    return BASE_HTML.format(content=f"<h2 class='text-xl font-bold mb-6'>My Scripts</h2>{cards if cards else '<p>No scripts yet.</p>'}")
 
-    db.execute("UPDATE scripts SET views = views + 1 WHERE id = ?", (script_id,))
+@app.get("/raw/{sid}")
+async def raw(sid: str):
+    db = get_db()
+    row = db.execute("SELECT content FROM versions WHERE script_id = ? ORDER BY v DESC LIMIT 1", (sid,)).fetchone()
+    if not row: return Response("-- Not Found", media_type="text/plain")
+    db.execute("UPDATE scripts SET views = views + 1 WHERE id = ?", (sid,))
     db.commit()
     return Response(content=row['content'], media_type="text/plain")
-
-@app.get("/api/scripts")
-async def list_scripts():
-    db = get_db()
-    scripts = db.execute("SELECT s.*, MAX(v.version_number) as latest_version FROM scripts s JOIN versions v ON s.id = v.script_id GROUP BY s.id").fetchall()
-    return [dict(row) for row in scripts]
-
-@app.post("/delete/{script_id}")
-async def delete_script(script_id: str):
-    db = get_db()
-    db.execute("DELETE FROM scripts WHERE id = ?", (script_id,))
-    db.commit()
-    return {"status": "ok"}
-    
+        
