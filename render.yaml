@@ -1,10 +1,16 @@
 services:
   - type: web
-    name: script-cdn
-    env: python
-    plan: free
+    name: scripthost
+    runtime: python
+    plan: free                        # Render free tier
+    region: oregon                    # closest free region
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health          # keeps the instance alive
     envVars:
+      - key: SECRET_KEY
+        generateValue: true           # Render auto-generates a secure random value
+      - key: DB_PATH
+        value: /tmp/scripthost.db     # writable path on free tier (ephemeral)
       - key: PYTHON_VERSION
-        value: 3.10.0
+        value: "3.11.9"
