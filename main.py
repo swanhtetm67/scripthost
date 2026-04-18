@@ -4,7 +4,8 @@ import random
 import string
 from datetime import datetime
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 # ─────────────────────────────────────────────
 #  CONFIG & DATABASE
@@ -38,6 +39,14 @@ def init_db():
 
 init_db()
 app = FastAPI(title=APP_NAME)
+
+# Allow Roblox game servers to fetch raw scripts
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "HEAD", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 # ─────────────────────────────────────────────
@@ -305,12 +314,12 @@ def layout(content: str, title: str = APP_NAME) -> str:
     <div class="max-w-6xl mx-auto px-4 sm:px-6 py-6 flex flex-col sm:flex-row
                 items-center justify-between gap-3 text-xs text-slate-600">
       <span>© 2025 {APP_NAME} — Free Lua Script CDN</span>
-      <a href="https://t.me/azhxss" target="_blank"
+      <a href="https://t.me/zhxss" target="_blank"
          class="flex items-center gap-1.5 text-indigo-500 hover:text-indigo-400 transition-colors">
         <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
           <path d="M11.944 0A12 12 0 1 0 24 12 12 12 0 0 0 11.944 0zm5.59 8.158-2.05 9.658c-.154.69-.557.858-1.128.534l-3.12-2.3-1.506 1.45c-.166.167-.306.306-.626.306l.224-3.163 5.766-5.207c.252-.224-.054-.347-.39-.123L8.31 14.34l-3.062-.956c-.665-.208-.68-.665.14-.986l11.955-4.607c.556-.2 1.04.137.853.966l.338-.599z"/>
         </svg>
-        @azhxss
+        @zhxss
       </a>
     </div>
   </footer>
@@ -816,9 +825,9 @@ async def upload_file(title: str = Form(""), file: UploadFile = File(...)):
 
 
 # ─────────────────────────────────────────────
-#  RAW  (serve plain Lua — tracks views)
+#  RAW  (serve plain Lua — Roblox compatible)
 # ─────────────────────────────────────────────
-@app.get("/raw/{script_id}", response_class=PlainTextResponse)
+@app.get("/raw/{script_id}")
 async def raw(script_id: str):
     with get_conn() as conn:
         script = conn.execute(
@@ -835,8 +844,19 @@ async def raw(script_id: str):
             raise HTTPException(status_code=404, detail="No content found")
 
         conn.execute("UPDATE scripts SET views=views+1 WHERE id=?", (script_id,))
+        content = ver["content"]
 
-    return PlainTextResponse(ver["content"], media_type="text/plain; charset=utf-8")
+    # Return with headers that Roblox HttpService accepts
+    return Response(
+        content=content,
+        media_type="text/plain",
+        headers={
+            "Content-Type": "text/plain",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+        }
+    )
 
 
 # ─────────────────────────────────────────────
