@@ -1,3 +1,4 @@
+import os
 import random
 import string
 import time
@@ -7,15 +8,31 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from database import get_db
 
+# --- AUTOMATIC DIRECTORY FIX ---
+# This prevents the "RuntimeError: Directory 'static' does not exist"
+required_folders = ["static", "templates"]
+for folder in required_folders:
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+        # Create a dummy file so Git/Render tracks the folder
+        with open(os.path.join(folder, ".keep"), "w") as f:
+            f.write("")
+
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Mount static files safely
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
 templates = Jinja2Templates(directory="templates")
 
-# Simple In-Memory Rate Limiting
-upload_history = {} # IP: timestamp
+# Simple In-Memory Rate Limiting (IP: last_upload_time)
+upload_history = {}
 
 def generate_id(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+# --- ROUTES ---
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
@@ -30,13 +47,12 @@ async def upload_script(request: Request, title: str = Form(...), content: str =
     client_ip = request.client.host
     current_time = time.time()
     
-    # Security: Rate Limit (1 upload per 10 seconds)
+    # 10 second rate limit
     if client_ip in upload_history and current_time - upload_history[client_ip] < 10:
-        raise HTTPException(status_code=429, detail="Slow down! Rate limit exceeded.")
+        raise HTTPException(status_code=429, detail="Please wait 10 seconds between uploads.")
     
-    # Security: Size & Empty Check
-    if not content.strip() or len(content) > 500000: # 500KB limit
-        raise HTTPException(status_code=400, detail="Invalid script content or too large.")
+    if not content.strip() or len(content) > 500000:
+        raise HTTPException(status_code=400, detail="Script is empty or too large (Max 500KB).")
 
     db = get_db()
     script_id = generate_id()
@@ -52,7 +68,6 @@ async def upload_script(request: Request, title: str = Form(...), content: str =
     return {
         "id": script_id,
         "raw_url": f"{base_url}/raw/{script_id}",
-        "dashboard_url": f"{base_url}/script/{script_id}",
         "version": 1
     }
 
@@ -63,14 +78,13 @@ async def get_raw_script(script_id: str, v: int = None):
         row = db.execute("SELECT content FROM versions WHERE script_id = ? AND version_number = ?", 
                          (script_id, v)).fetchone()
     else:
-        # Get latest version
         row = db.execute("SELECT content FROM versions WHERE script_id = ? ORDER BY version_number DESC LIMIT 1", 
                          (script_id,)).fetchone()
     
     if not row:
-        return Response(content="-- Script not found", media_type="text/plain")
+        return Response(content="-- Script not found or deleted", media_type="text/plain")
 
-    # Increment view count
+    # Tracking view count
     db.execute("UPDATE scripts SET views = views + 1 WHERE id = ?", (script_id,))
     db.commit()
 
@@ -87,23 +101,14 @@ async def list_scripts():
     ''').fetchall()
     return [dict(row) for row in scripts]
 
-@app.post("/update/{script_id}")
-async def update_script(script_id: str, content: str = Form(...)):
-    db = get_db()
-    last_v = db.execute("SELECT MAX(version_number) FROM versions WHERE script_id = ?", 
-                        (script_id,)).fetchone()[0]
-    
-    if last_v is None:
-        raise HTTPException(status_code=404, detail="Script not found")
-
-    db.execute("INSERT INTO versions (script_id, content, version_number) VALUES (?, ?, ?)", 
-               (script_id, content, last_v + 1))
-    db.commit()
-    return {"status": "success", "new_version": last_v + 1}
-
 @app.post("/delete/{script_id}")
 async def delete_script(script_id: str):
     db = get_db()
     db.execute("DELETE FROM scripts WHERE id = ?", (script_id,))
+    db.execute("DELETE FROM versions WHERE script_id = ?", (script_id,))
     db.commit()
     return {"status": "deleted"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=10000)
